@@ -1,4 +1,4 @@
-// background.js - LinkRadar beta 0.1.0
+// background.js - LinkRadar beta 0.2.1
 // Инъекция content.js по клику. Ping-цикл после executeScript.
 // Все ответы на onMessage — синхронные (return false).
 // updateBadge(...).catch() — защита от unhandled rejection.
@@ -14,8 +14,6 @@ const CONTENT_SCRIPT_PING_DELAY_MS = 50;
 // ============================================
 // ПРОВЕРКА URL
 // ============================================
-// Разрешаем только http(s). Внутренние домены (2gis.*, .local, .corp,
-// .intranet, localhost, IP) отсекаются в content.js через isInternalDomain.
 
 function isSupportedUrl(urlString) {
   try {
@@ -127,6 +125,86 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 // ============================================
+// ПРОВЕРКА ОБНОВЛЕНИЙ
+// ============================================
+
+const remoteManifestUrl = "https://raw.githubusercontent.com/Vitalijan/LinkRadar/refs/heads/main/manifest.json";
+
+async function checkForUpdate() {
+  if (DEBUG) console.log("🔍 Запуск проверки обновления...");
+
+  try {
+    const currentVersion = chrome.runtime.getManifest().version;
+    if (DEBUG) console.log("Текущая версия:", currentVersion);
+
+    const response = await fetch(remoteManifestUrl + "?t=" + Date.now(), {
+      cache: "no-store"
+    });
+
+    if (!response.ok) {
+      throw new Error(`Ошибка сети: ${response.status}`);
+    }
+
+    const remoteManifest = await response.json();
+
+    if (!remoteManifest || !remoteManifest.version) {
+      throw new Error('Неверный формат данных: нет поля "version"');
+    }
+
+    const remoteVersion = remoteManifest.version;
+    if (DEBUG) console.log("Удаленная версия:", remoteVersion);
+
+    if (isNewerVersion(remoteVersion, currentVersion)) {
+      if (DEBUG) console.log(`🚀 Доступна новая версия: ${remoteVersion}`);
+
+      chrome.notifications.create("update-available", {
+        type: "basic",
+        iconUrl: "icons/icon128.png",
+        title: "Доступно обновление LinkRadar!",
+        message: `Вышла новая версия: ${remoteVersion}\nКликни на меня, чтобы скачать обновление!`,
+        priority: 2
+      }, (notificationId) => {
+        if (chrome.runtime.lastError) {
+          console.error("❌ Ошибка создания уведомления:", chrome.runtime.lastError.message);
+          return;
+        }
+        if (DEBUG) console.log("✅ Уведомление создано:", notificationId);
+      });
+
+    } else {
+      if (DEBUG) console.log("Обновлений нет.");
+    }
+
+  } catch (error) {
+    console.error("Ошибка при проверке обновления:", error);
+  }
+}
+
+function isNewerVersion(a, b) {
+  const partsA = String(a).trim().split(".").map(Number);
+  const partsB = String(b).trim().split(".").map(Number);
+
+  for (let i = 0; i < Math.max(partsA.length, partsB.length); i++) {
+    const partA = partsA[i] || 0;
+    const partB = partsB[i] || 0;
+
+    if (partA > partB) return true;
+    if (partA < partB) return false;
+  }
+
+  return false;
+}
+
+chrome.notifications.onClicked.addListener((id) => {
+  if (id === "update-available") {
+    const updateUrl = chrome.runtime.getManifest().update_url;
+    if (updateUrl) {
+      chrome.tabs.create({ url: updateUrl });
+    }
+  }
+});
+
+// ============================================
 // LIFECYCLE
 // ============================================
 
@@ -136,4 +214,9 @@ chrome.runtime.onInstalled.addListener((details) => {
   } else if (details.reason === 'update') {
     if (DEBUG) console.log('LinkRadar обновлён');
   }
+  checkForUpdate();
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  checkForUpdate();
 });
