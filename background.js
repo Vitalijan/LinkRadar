@@ -1,4 +1,4 @@
-// background.js - LinkRadar beta 0.2.1
+// background.js - LinkRadar beta 0.3.1
 // Инъекция content.js по клику. Ping-цикл после executeScript.
 // Все ответы на onMessage — синхронные (return false).
 // updateBadge(...).catch() — защита от unhandled rejection.
