@@ -1,4 +1,4 @@
-// content.js - LinkRadar beta 0.2.1
+// content.js - LinkRadar beta 0.3.1
 // Работает только по клику на иконку.
 // Без innerHTML, UI в Shadow DOM (closed), блокировка на внутренних доменах.
 // Все ответы на onMessage — синхронные (return false).
@@ -12,6 +12,37 @@
 // ВАЖНО (ИБ): расширение только ЗАПИСЫВАЕТ в буфер по клику.
 // FIX: isJunkLink пропускает WhatsApp-ссылки с ?phone=...
 // FIX: mutationsCouldAddData реагирует на появление соцсетевых ссылок (SPA).
+// NEW: поиск графика работы (метки, диапазоны времени, круглосуточно).
+// NEW: фильтрация placeholder-email (text@mail.ru из подсказок и ошибок форм).
+// NEW: дедупликация графика по DOM-вложенности (без дублей td/tr/p).
+// NEW: поиск организаций по ООО/ИП/МБУ и т.п. (карточка "Организация").
+// NEW: селекторы VK *_site в SITE_BLOCK_SELECTORS.
+// NEW: полные формы организаций (Общество с ограниченной ответственностью, ...).
+// NEW: поиск адресов организаций (индекс, регион, город, улица, дом).
+// NEW: вкладки в выдаче (Название/ИНН / Адрес / Контакты / График).
+// NEW: пустые вкладки скрываются, но возвращаются при появлении данных.
+// NEW: телефон в скобках без префикса (3852) 557270; формат 4-значного кода 2-2-2.
+// NEW: телефон в скобках с дефисами (7-385-2) 59-44-66; корректный код 3852.
+// NEW: приоритет видимого номера над tel:-href (заглушки 8-800-...-...).
+// NEW: отбрасываем placeholder-телефоны (800-888-88-88, 000-00-00 и т.п.).
+// NEW: не откатываемся на tel:-href, если видимый текст выглядит телефоном, но невалиден.
+// NEW: tel:-ссылки в processedTel, чтобы текстовый walker не дублировал их содержимое.
+// NEW: findNumbersNearLabel не break-ает на <p> (метка в <p>, число в соседнем блоке).
+// NEW: OGRN_LABEL_REGEX принимает 13-15 цифр (ОГРН/ОГРНИП), тип определяет getOGRNType.
+// NEW: PHONE_REGEX_PAREN_CODE принимает префикс 8/+7/7 перед скобкой (8(395 53) 5-25-48).
+// NEW: ИНН/ОГРН/ОГРНИП с пробелами/дефисами внутри цифр (720 300 904 584).
+// NEW: ИП:/ООО:/... с двоеточием после аббревиатуры.
+// NEW: стоп-символы ИНН/ОГРН/... через lookahead (кириллица + <br> без пробелов).
+// FIX: getAllLinks обходит голые URL в тексте (https://vk.com/... в <p>).
+// FIX: mutationsCouldAddData реагирует на голый URL соцсети/букинга в тексте.
+// NEW: карточка Яндекс.Карты в выдаче (вкладка Адрес). Клик → подсветка iframe на странице.
+// NEW: поиск yandex map iframe/ссылок, извлечение адреса из title/aria-label/param/sosedey.
+// FIX: isJunkYandexMap пропускает ?um= (Tilda Constructor-карты).
+// FIX: isYandexMapUrl отсекает tech.yandex.ru и /maps/mapsapi/ (доки).
+// NEW: поддержка JS-карт ymaps (Mosaic/Megagroup) через [data-init-params].
+// NEW: клик по JS-карте подсвечивает контейнер ymaps, а не водяной знак «Создать свою карту».
+// NEW: убраны кнопки «Копировать» в карточках вкладок Адрес и График.
+// NEW: для Дзена и Рутуба копируется полный URL (а не только путь).
 
 (function () {
   'use strict';
@@ -68,6 +99,7 @@
     '[data-testid="group-info-site"]',
     '[data-testid="profile-info-site"]',
     '[data-testid="community-info-site"]',
+    '[data-testid="groups_detailed_info_site"]',
     '.group-info_row.__site',
     '.profile-info_row.__site',
     '.group-info__site',
@@ -75,12 +107,16 @@
     '.portal__site',
     '.user-info__site',
     '.group-info-site',
-    '[data-testid$="-site"]'
+    '[data-testid$="-site"]',
+    '[data-testid$="_site"]'
   ];
 
   const SERVICE_DOMAINS = new Set(['knd.gov.ru', 'gosuslugi.ru', 'roscomnadzor.gov.ru', 'rkn.gov.ru']);
   const REDIRECT_HOST_PATTERN = /(^|\.)(vk\.com|vk\.ru|ok\.ru|odnoklassniki\.ru|mail\.ru)$/i;
   const SITE_LABEL_REGEX = /^\s*(сайт|website|site)\s*:\s*/i;
+
+  const YANDEX_MAP_HOSTS = ['yandex.ru', 'yandex.com', 'yandex.by', 'yandex.kz', 'yandex.ua', 'yandex.com.tr', 'yandex.uz'];
+  const YANDEX_MAP_PATH_PATTERNS = [/\/map-widget/, /\/maps\//, /\/maps$/, /\/map\//];
 
   const LOCAL_PHONE_LABEL_REGEX = /(?<![\p{L}\d])(?:тел\.?|телефон\p{L}{0,4}|phone|tel\.?|telephone|call|звоните|позвоните|📞|☎\uFE0F?)(?![\p{L}])/iu;
   const LOCAL_PHONE_GROUPS_REGEX = /(?<!\d)((?:\d{1,4}[\s.\u00A0\-\u2010\u2011\u2012\u2013\u2014\u2212]+){1,3}\d{1,4})(?![\d\p{L}])/g;
@@ -167,15 +203,135 @@
 
   const PHONE_REGEX_STRICT = /(?<!\d)(?:\+7|\+?8|7)[\s\-\u2010\u2011\u2012\u2013\u2014\u2212]*\(?\d{3}\)?[\s\-\u2010\u2011\u2012\u2013\u2014\u2212]*\d{3}[\s\-\u2010\u2011\u2012\u2013\u2014\u2212]?\d{2}[\s\-\u2010\u2011\u2012\u2013\u2014\u2212]?\d{2}(?!\d)/g;
   const PHONE_REGEX_CITY4 = /(?<!\d)(?:\+7|\+?8|7)[\s\-\u2010\u2011\u2012\u2013\u2014\u2212]*\(\d{4}\)[\s\-\u2010\u2011\u2012\u2013\u2014\u2212]*\d{3}[\s\-\u2010\u2011\u2012\u2013\u2014\u2212]?\d{3}(?!\d)/g;
+  const PHONE_REGEX_PAREN_CODE = /(?<!\d)(?:\+?[78][\s\-\u2010\u2011\u2012\u2013\u2014\u2212]*)?\((?:\+?[78][\s\-\u2010\u2011\u2012\u2013\u2014\u2212]*)?[3-8][\d\s\-\u2010\u2011\u2012\u2013\u2014\u2212]{1,6}\)[\s\-\u2010\u2011\u2012\u2013\u2014\u2212]*\d[\d\s\-\u2010\u2011\u2012\u2013\u2014\u2212]{4,10}\d(?!\d)/g;
   const PHONE_REGEX_LOOSE = /(?:\+?\d[\d\-()\u2010\u2011\u2012\u2013\u2014\u2212]{8,18}\d)/g;
 
   const EMAIL_REGEX = /[\p{L}0-9._%+\-]+@[\p{L}\p{N}.\-]+\.[\p{L}]{2,}/gu;
-  const INN_LABEL_REGEX = /ИНН\s*[:.]?\s*(\d{12}|\d{10})\b/gi;
-  const OGRN_LABEL_REGEX = /ОГРН\s*[:.]?\s*(\d{13})\b/gi;
-  const OGRNIP_LABEL_REGEX = /ОГРНИП\s*[:.]?\s*(\d{15})\b/gi;
+
+  const INN_LABEL_REGEX = /ИНН\s*[:.]?\s*((?:\d[\s\u00A0\-\u2010\u2011\u2012\u2013\u2014\u2212]*){10,12})(?!\d)/gi;
+  const OGRN_LABEL_REGEX = /ОГРН\s*[:.]?\s*((?:\d[\s\u00A0\-\u2010\u2011\u2012\u2013\u2014\u2212]*){13,15})(?!\d)/gi;
+  const OGRNIP_LABEL_REGEX = /ОГРНИП\s*[:.]?\s*((?:\d[\s\u00A0\-\u2010\u2011\u2012\u2013\u2014\u2212]*){15})(?!\d)/gi;
+
+  const EMAIL_PLACEHOLDER_CONTEXT_RE =
+    /(?:в\s+формате|формат[аеыу]?\s|формат\s*[:.]|пример[аеыу]?\s|пример\s*[:.]|например|образец|шаблон|e\.g\.|eg\.|example|sample|format\s*[:.]|placeholder)/i;
+
+  const EMAIL_PLACEHOLDER_CLASS_RE =
+    /form[-_]?error|form[-_]?hint|form[-_]?note|form[-_]?help|field[-_]?error|field[-_]?hint|input[-_]?error|input[-_]?hint|error[-_]?message|help[-_]?text|hint[-_]?text|placeholder|example|sample|dummy/i;
+
+  const DUMMY_EMAIL_LOCAL_PARTS = new Set([
+    'example', 'sample', 'test', 'testtest', 'qwerty',
+    'text', 'your', 'yourname', 'username', 'name',
+    'email', 'emailaddress', 'username123', 'user123', 'test123'
+  ]);
+
+  const SCHEDULE_TIME_RANGE_RE =
+    /(?<!\d)([01]?\d|2[0-3])[:.](\d{2})\s*[\-\u2010\u2011\u2012\u2013\u2014\u2212]\s*([01]?\d|2[0-3])[:.](\d{2})(?!\d)/;
+  const SCHEDULE_TIME_RANGE_RE_G =
+    /(?<!\d)([01]?\d|2[0-3])[:.](\d{2})\s*[\-\u2010\u2011\u2012\u2013\u2014\u2212]\s*([01]?\d|2[0-3])[:.](\d{2})(?!\d)/g;
+  const SCHEDULE_FROM_TO_RE =
+    /(?<!\d)с\s+([01]?\d|2[0-3])[:.](\d{2})\s+до\s+([01]?\d|2[0-3])[:.](\d{2})(?!\d)/i;
+  const SCHEDULE_FROM_TO_RE_G =
+    /(?<!\d)с\s+([01]?\d|2[0-3])[:.](\d{2})\s+до\s+([01]?\d|2[0-3])[:.](\d{2})(?!\d)/gi;
+  const SCHEDULE_STRONG_LABEL_RE =
+    /(?:^|[^\p{L}])(время\s+работы|график\s+работы|часы\s+работы|режим\s+работы)(?:[^\p{L}]|$)/iu;
+  const SCHEDULE_SEMANTIC_LABEL_RE =
+    /(?:^|[^\p{L}])(работаем|ежедневно|без\s+выходных)(?:[^\p{L}]|$)/iu;
+  const SCHEDULE_ROUND_CLOCK_RE =
+    /(?:^|[^\p{L}])(круглосуточно|24\s*\/\s*7|24\s+на\s+7)(?:[^\p{L}]|$)/iu;
+  const SCHEDULE_DAYS_RE =
+    /(?:^|[^\p{L}])(пн|вт|ср|чт|пт|сб|вс|понедельник|вторник|среда|четверг|пятница|суббота|воскресенье)(?:[^\p{L}]|$)/iu;
+
+  const SCHEDULE_SELECTORS = [
+    '[class*="schedule" i]',
+    '[class*="work-time" i]',
+    '[class*="worktime" i]',
+    '[class*="working-hours" i]',
+    '[class*="workinghours" i]',
+    '[class*="opening-hours" i]',
+    '[class*="openinghours" i]',
+    '[class*="business-hours" i]',
+    '[class*="businesshours" i]',
+    '[itemprop="openingHours"]',
+    '[itemprop="openingHoursSpecification"]',
+    '[data-schedule]',
+    '[data-working-hours]',
+    '[data-work-time]'
+  ];
+
+  const ADDRESS_LABEL_RE =
+    /(?<![а-яё])(?:(?:юридическ|фактическ|почтов)\p{L}*\s+адрес|адрес(?:\s+(?:объекта|места(?:\s+осуществления(?:\s+образовательной\s+деятельности)?)?))?|место\s+нахождения|место\s+осуществления(?:\s+образовательной\s+деятельности)?)(?![а-яё])/iu;
+
+  const ADDRESS_POSTAL_RE = /(?<!\d)\d{6}(?!\d)/;
+
+  const ADDRESS_STREET_RE =
+    /(?<![а-яё])(?:ул\.?|улица|пр(?:-?т)?\.?|просп\.?|проспект|пер\.?|переулок|пл\.?|площадь|шоссе|б-р\.?|бульвар|наб\.?|набережная|туп\.?|тупик|мкр\.?|микрорайон|проезд|аллея|тракт)(?![а-яё])/iu;
+
+  const ADDRESS_HOUSE_RE =
+    /(?:^|[\s,.])(?:д\.?|дом)\s*\d+[А-ЯЁа-яёA-Za-z0-9/\-]*/iu;
+
+  const ADDRESS_REGION_RE =
+    /(?<![а-яё])(?:обл\.?|область|край|респ\.?|республика|автономн\p{L}*\s+округ)(?![а-яё])/iu;
+
+  const ADDRESS_CITY_RE =
+    /(?<![а-яё])(?:г\.?|город|гор\.?)\s*[А-ЯЁA-Z]/u;
+
+  const ADDRESS_SETTLEMENT_RE =
+    /(?<![а-яё])(?:с\.|село|п\.|посёлок|поселок|пгт|д\.|деревня|ст\.|станица|х\.|хутор|аул|рп|рабочий\s+посёлок)\s*[А-ЯЁA-Z]/u;
+
+  const ADDRESS_SELECTORS = [
+    '[itemprop="address"]',
+    '[itemtype*="PostalAddress"]',
+    '[data-address]',
+    '[data-addr]',
+    '[class*="address" i]',
+    '[class*="addr" i]',
+    '[id*="address" i]',
+    '[id*="addr" i]',
+    'address'
+  ];
+
+  const ADDRESS_STOP_RE =
+    /(?:[!?;|]|\n|\r|\s{2,}|(?=(?:ИНН|ОГРН|ОГРНИП|КПП|БИК|Телефон|Тел\.|Факс|Сайт|Email|Почта|Директор|Руководитель|ФИО|Режим|График|Вид\s+места)(?![\p{L}])))/iu;
+
+  const ORG_ABBREV_RE =
+    /(?<![\p{L}])(ООО|ОАО|ЗАО|ПАО|АО|ИП|НКО|АНО|МБУ|МБОУ|МАОУ|МКОУ|МБДОУ|МАДОУ|МКДОУ|МУП|ГУП|ФГУП|ФГБУ|ФГБОУ|ФГАОУ|ФГБНУ|ГБУ|ГБОУ|ГАУ|ГКУ|КГБУ|КГБОУ|МКУ|МБУК|ГБУК|ФКУ|ТСЖ|ЖСК|СНТ|ДНП|КФХ|НОУ|ЧОУ|ГБПОУ|ОГБУ|ОГАУ|ОГКУ)(?![\p{L}])/gu;
+
+  const ORG_FULL_RE = new RegExp(
+    '(?<![\\p{L}])(' +
+      [
+        'Обществ\\p{L}*\\s+с\\s+ограниченной\\s+ответственностью',
+        'Индивидуальн\\p{L}*\\s+предпринимател\\p{L}*',
+        '(?:Публичн|Непубличн|Закрыт|Открыт|Акционерн)\\p{L}*\\s+обществ\\p{L}*',
+        'Муниципальн\\p{L}*\\s+(?:бюджетн|казенн|автономн)\\p{L}*\\s+(?:общеобразовательн\\p{L}*\\s+|дошкольн\\p{L}*\\s+образовательн\\p{L}*\\s+)?учреждени\\p{L}*',
+        'Государственн\\p{L}*\\s+(?:бюджетн|казенн|автономн)\\p{L}*\\s+(?:общеобразовательн\\p{L}*\\s+)?учреждени\\p{L}*',
+        'Федеральн\\p{L}*\\s+государственн\\p{L}*\\s+(?:бюджетн|казенн|автономн)\\p{L}*\\s+(?:общеобразовательн\\p{L}*\\s+)?учреждени\\p{L}*',
+        '(?:Федеральн\\p{L}*\\s+)?(?:государственн\\p{L}*\\s+|муниципальн\\p{L}*\\s+)?унитарн\\p{L}*\\s+предприяти\\p{L}*',
+        '(?:Автономн\\p{L}*\\s+)?некоммерческ\\p{L}*\\s+организаци\\p{L}*',
+        'Некоммерческ\\p{L}*\\s+партнерств\\p{L}*',
+        'Общественн\\p{L}*\\s+организаци\\p{L}*',
+        'Религиозн\\p{L}*\\s+организаци\\p{L}*',
+        'Потребительск\\p{L}*\\s+(?:обществ\\p{L}*|кооператив\\p{L}*)',
+        'Производственн\\p{L}*\\s+кооператив\\p{L}*',
+        'Крестьянск\\p{L}*\\s+(?:фермерск\\p{L}*\\s+)?хозяйств\\p{L}*',
+        'Товариществ\\p{L}*\\s+собственников\\s+(?:жилья|недвижимости)',
+        'Садоводческ\\p{L}*\\s+некоммерческ\\p{L}*\\s+товариществ\\p{L}*'
+      ].join('|') +
+    ')(?![\\p{L}])',
+    'gu'
+  );
+
+  const ORG_STOP_RE =
+    /(?:[!?;]|\n|\r|\s{2,}|(?=(?:ИНН|ОГРН|ОГРНИП|КПП|БИК|Адрес|Телефон|Тел\.|Факс|Сайт|Email|Почта|Директор|Руководитель|ФИО)(?![\p{L}])))/iu;
 
   const TEXT_FILTER_REGEX = /[0-9@]|ИНН|ОГРН/i;
   const TEXT_URL_REGEX = /(https?:\/\/[^\s]+|(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(?:\/[^\s]*)?)/gi;
+
+  const TAB_CONFIG = [
+    { id: 'org', label: 'Название/ИНН' },
+    { id: 'address', label: 'Адрес' },
+    { id: 'contacts', label: 'Контакты' },
+    { id: 'schedule', label: 'График' }
+  ];
 
   const PANEL_CONFIG = {
     badgeSize: '48px',
@@ -324,6 +480,7 @@
   let panelShadowRoot = null;
   let badgeEl = null;
   let windowEl = null;
+  let tabsEl = null;
   let linksContainerEl = null;
   let panelTitleEl = null;
   let feedbackLinkEl = null;
@@ -335,12 +492,72 @@
   let cachedResults = null;
   let cacheTimestamp = 0;
 
+  let currentItems = null;
+  let activeTabId = 'org';
+
   const DEBUG = false;
 
   let isDraggingPanel = false;
   let cancelRender = false;
   let renderToken = 0;
   let isFeedbackClicking = false;
+
+  function getTabForItem(item) {
+    const n = item.network;
+    if (n === 'org' || n === 'inn' || n === 'ogrn' || n === 'ogrnip') return 'org';
+    if (n === 'address' || n === 'yandexmap') return 'address';
+    if (n === 'schedule') return 'schedule';
+    return 'contacts';
+  }
+
+  function countByTab(items) {
+    const counts = { org: 0, address: 0, contacts: 0, schedule: 0 };
+    if (!items) return counts;
+    for (const item of items) counts[getTabForItem(item)]++;
+    return counts;
+  }
+
+  function filterByTab(items, tabId) {
+    if (!items) return [];
+    return items.filter(it => getTabForItem(it) === tabId);
+  }
+
+  function getEmptyMessage(tabId) {
+    switch (tabId) {
+      case 'org': return '🏢 Организаций и реквизитов не найдено';
+      case 'address': return '📍 Адресов не найдено';
+      case 'contacts': return '📞 Контактов не найдено';
+      case 'schedule': return '🕒 График работы не найден';
+      default: return '🔍 Ничего не найдено';
+    }
+  }
+
+  function updateTabs(items) {
+    if (!tabsEl) return;
+    const counts = countByTab(items);
+    tabsEl.querySelectorAll('.lr-tab').forEach(tabEl => {
+      const id = tabEl.dataset.tabId;
+      const countEl = tabEl.querySelector('.lr-tab-count');
+      const c = counts[id] || 0;
+      if (countEl) countEl.textContent = String(c);
+      tabEl.classList.toggle('hidden', c === 0);
+    });
+    updateTabsActive();
+  }
+
+  function updateTabsActive() {
+    if (!tabsEl) return;
+    tabsEl.querySelectorAll('.lr-tab').forEach(tabEl => {
+      tabEl.classList.toggle('active', tabEl.dataset.tabId === activeTabId);
+    });
+  }
+
+  function switchTab(tabId) {
+    if (activeTabId === tabId) return;
+    activeTabId = tabId;
+    updateTabsActive();
+    if (currentItems) renderLinks(false, currentItems);
+  }
 
   function normalizePhone(phone, isTel) {
     if (!phone) return null;
@@ -401,6 +618,17 @@
     return null;
   }
 
+  function looksLikePlaceholderPhone(phone) {
+    if (!phone) return true;
+    const cleaned = String(phone).replace(/[^0-9]/g, '');
+    if (cleaned.length < 10) return false;
+    const local = cleaned.slice(-7);
+    if (/^(\d)\1{6}$/.test(local)) return true;
+    const uniqueDigits = new Set(local).size;
+    if (uniqueDigits <= 1) return true;
+    return false;
+  }
+
   function toPunycodeHost(domain) {
     if (!domain) return '';
     try { return new URL('http://' + domain).hostname.toLowerCase(); }
@@ -442,19 +670,50 @@
     return null;
   }
 
+  function looksLikePlaceholderEmail(email, element) {
+    if (!email) return false;
+    const atIdx = email.indexOf('@');
+    if (atIdx <= 0) return false;
+    const local = email.slice(0, atIdx).toLowerCase();
+
+    if (DUMMY_EMAIL_LOCAL_PARTS.has(local)) return true;
+
+    let node = element;
+    let depth = 0;
+    while (node && depth < 6) {
+      try {
+        if (typeof node.className === 'string' && node.className) {
+          if (EMAIL_PLACEHOLDER_CLASS_RE.test(node.className)) return true;
+        }
+        const id = typeof node.id === 'string' ? node.id : '';
+        if (id && EMAIL_PLACEHOLDER_CLASS_RE.test(id)) return true;
+
+        const t = node.textContent || '';
+        if (t.length > 0 && t.length < 800) {
+          if (EMAIL_PLACEHOLDER_CONTEXT_RE.test(t)) return true;
+        }
+      } catch { /* ignore */ }
+      if (node.tagName === 'FORM' || node.tagName === 'BODY') break;
+      node = node.parentElement;
+      depth++;
+    }
+
+    return false;
+  }
+
   function normalizeINN(inn) {
     if (!inn) return null;
-    const trimmed = String(inn).trim();
-    if (!/^\d+$/.test(trimmed)) return null;
-    if (trimmed.length === 10 || trimmed.length === 12) return trimmed;
+    const cleaned = String(inn).replace(/[^0-9]/g, '');
+    if (!cleaned) return null;
+    if (cleaned.length === 10 || cleaned.length === 12) return cleaned;
     return null;
   }
 
   function normalizeOGRN(ogrn) {
     if (!ogrn) return null;
-    const trimmed = String(ogrn).trim();
-    if (!/^\d+$/.test(trimmed)) return null;
-    if (trimmed.length === 13 || trimmed.length === 15) return trimmed;
+    const cleaned = String(ogrn).replace(/[^0-9]/g, '');
+    if (!cleaned) return null;
+    if (cleaned.length === 13 || cleaned.length === 15) return cleaned;
     return null;
   }
 
@@ -525,20 +784,19 @@
     if (!phone) return phone;
 
     if (originalText && phone.length === 11 && phone.startsWith('7')) {
-      let m = originalText.match(/\((\d{5})\)/);
-      if (m) {
-        const code5 = m[1];
-        if (phone.slice(1, 6) === code5) {
-          const local = phone.slice(6);
-          if (local.length === 5) return `+7 (${code5}) ${local.slice(0,1)}-${local.slice(1,3)}-${local.slice(3)}`;
+      const parenMatch = originalText.match(/\(([^()]+)\)/);
+      if (parenMatch) {
+        let codeDigits = parenMatch[1].replace(/[^\d]/g, '');
+        if (codeDigits.length === 5 && (codeDigits[0] === '7' || codeDigits[0] === '8')) {
+          codeDigits = codeDigits.slice(1);
         }
-      }
-      m = originalText.match(/\((\d{4})\)/);
-      if (m) {
-        const code4 = m[1];
-        if (phone.slice(1, 5) === code4) {
+        if (codeDigits.length === 5 && phone.slice(1, 6) === codeDigits) {
+          const local = phone.slice(6);
+          if (local.length === 5) return `+7 (${codeDigits}) ${local.slice(0,1)}-${local.slice(1,3)}-${local.slice(3)}`;
+        }
+        if (codeDigits.length === 4 && phone.slice(1, 5) === codeDigits) {
           const local = phone.slice(5);
-          if (local.length === 6) return `+7 (${code4}) ${local.slice(0,3)}-${local.slice(3)}`;
+          if (local.length === 6) return `+7 (${codeDigits}) ${local.slice(0,2)}-${local.slice(2,4)}-${local.slice(4)}`;
         }
       }
     }
@@ -573,13 +831,13 @@
       const content = node.textContent || '';
       if (content.length > 0 && content.length < 5000) {
         if (content.toLowerCase().includes(labelLower)) {
-          const re = new RegExp(`(?<!\\d)(\\d{${minLen},${maxLen}})(?!\\d)`, 'g');
+          const re = new RegExp(`(?<!\\d)((?:\\d[\\s.\\u00A0\\-\\u2010\\u2011\\u2012\\u2013\\u2014\\u2212]*){${minLen},${maxLen}})(?!\\d)`, 'g');
           const nums = [...content.matchAll(re)].map(m => m[1]);
           if (nums.length > 0) return { ancestor: node, numbers: nums };
         }
       }
       if (node.tagName === 'TR' || node.tagName === 'LI' || node.tagName === 'DL' ||
-          node.tagName === 'P' || node.tagName === 'TABLE') break;
+          node.tagName === 'TABLE' || node.tagName === 'FORM') break;
       node = node.parentElement;
       depth++;
     }
@@ -742,6 +1000,8 @@
     if (strictMatches) allMatches.push(...strictMatches);
     const city4Matches = text.match(PHONE_REGEX_CITY4);
     if (city4Matches) allMatches.push(...city4Matches);
+    const parenCodeMatches = text.match(PHONE_REGEX_PAREN_CODE);
+    if (parenCodeMatches) allMatches.push(...parenCodeMatches);
     if (allMatches.length > 0) return allMatches;
 
     let digitCount = 0;
@@ -766,6 +1026,7 @@
     const processedOGRN = new Set();
 
     function addPhone(phone, element, text, isTel, isVerified, matchedText) {
+      if (looksLikePlaceholderPhone(phone)) return;
       let normalizedForDedup = phone;
       if (isTel && phone.startsWith('8') && phone.length === 11) normalizedForDedup = '7' + phone.slice(1);
       if (excludePhones.has(normalizedForDedup)) return;
@@ -795,6 +1056,8 @@
 
     function addLocalPhone(match, element, contextText) {
       if (!match || !match.digits) return;
+      if (/^(\d)\1+$/.test(match.digits)) return;
+      if (new Set(match.digits).size <= 1) return;
       const key = 'local:' + match.digits;
       if (phonesSeen.has(key)) return;
 
@@ -821,6 +1084,8 @@
     }
 
     function addEmail(email, element, text, isMailto, isVerified, matchedText) {
+      if (!isVerified && looksLikePlaceholderEmail(email, element)) return;
+
       const key = email;
       if (!emailsSeen.has(key)) {
         emailsSeen.set(key, {
@@ -872,14 +1137,39 @@
 
     try {
       document.querySelectorAll(SELECTORS.telLinks).forEach(el => {
+        processedTel.add(el);
+
         const rawHref = toUrlString(el.getAttribute('href')) || toUrlString(el.href);
         if (!rawHref) return;
-        const phone = parseHref(rawHref, 'tel');
-        const normalized = normalizePhone(phone, true);
-        if (normalized) {
-          const visible = (el.textContent || '').trim();
-          const matchedText = visible || phone;
-          addPhone(normalized, el, matchedText, true, true, matchedText);
+        const phoneFromHref = parseHref(rawHref, 'tel');
+        const normalizedHref = normalizePhone(phoneFromHref, true);
+        const visible = (el.textContent || '').trim();
+
+        let usePhone = null;
+        let matchedText = '';
+
+        if (visible) {
+          const visibleMatches = extractPhonesFromText(visible);
+          if (visibleMatches && visibleMatches.length > 0) {
+            for (const vm of visibleMatches) {
+              const vNorm = normalizePhone(vm, false);
+              if (vNorm) {
+                usePhone = vNorm;
+                matchedText = vm.trim();
+                break;
+              }
+            }
+          } else {
+            usePhone = normalizedHref;
+            matchedText = phoneFromHref;
+          }
+        } else {
+          usePhone = normalizedHref;
+          matchedText = phoneFromHref;
+        }
+
+        if (usePhone) {
+          addPhone(usePhone, el, matchedText, true, true, matchedText);
         }
       });
     } catch { /* ignore */ }
@@ -1107,6 +1397,735 @@
       inns: Array.from(innsSeen.values()),
       ogrns: Array.from(ogrnsSeen.values())
     };
+  }
+
+  function analyzeAddress(text) {
+    if (!text || text.length < 10 || text.length > 500) return null;
+    const hasLabel = ADDRESS_LABEL_RE.test(text);
+    const hasPostal = ADDRESS_POSTAL_RE.test(text);
+    const hasStreet = ADDRESS_STREET_RE.test(text);
+    const hasHouse = ADDRESS_HOUSE_RE.test(text);
+    const hasRegion = ADDRESS_REGION_RE.test(text);
+    const hasCity = ADDRESS_CITY_RE.test(text);
+    const hasSettlement = ADDRESS_SETTLEMENT_RE.test(text);
+
+    const componentCount = [hasPostal, hasStreet, hasHouse, hasRegion, hasCity, hasSettlement].filter(Boolean).length;
+
+    const accepted =
+      (hasLabel && componentCount >= 1) ||
+      (hasPostal && componentCount >= 2) ||
+      (hasStreet && (hasHouse || hasRegion || hasCity || hasSettlement)) ||
+      (hasRegion && (hasCity || hasSettlement)) ||
+      (hasCity && (hasSettlement || hasStreet || hasHouse)) ||
+      componentCount >= 3;
+
+    if (!accepted) return null;
+
+    let score = 0;
+    if (hasLabel) score += 5;
+    if (hasStreet) score += 3;
+    if (hasHouse) score += 2;
+    if (hasPostal) score += 2;
+    if (hasRegion) score += 1;
+    if (hasCity) score += 1;
+    if (hasSettlement) score += 1;
+
+    return { score, hasLabel };
+  }
+
+  function extractAddress(text) {
+    if (!text || text.length < 10) return null;
+    let trimmed = text.replace(/\s+/g, ' ').trim();
+    if (trimmed.length > 300) trimmed = trimmed.slice(0, 300);
+
+    const a = analyzeAddress(trimmed);
+    if (!a) return null;
+
+    let startIdx = 0;
+    const labelInHead = trimmed.slice(0, 40).match(ADDRESS_LABEL_RE);
+    if (labelInHead && labelInHead.index !== undefined) {
+      startIdx = labelInHead.index + labelInHead[0].length;
+      while (startIdx < trimmed.length && /[\s:]/.test(trimmed[startIdx])) startIdx++;
+    }
+
+    const tail = trimmed.slice(startIdx);
+    if (!tail) return null;
+
+    const stop = tail.match(ADDRESS_STOP_RE);
+    let endIdx = stop ? stop.index : tail.length;
+    let address = tail.slice(0, endIdx).replace(/\s+/g, ' ').trim();
+    address = address.replace(/[,;:.\-\s]+$/g, '').trim();
+
+    if (address.length < 10) return null;
+
+    const a2 = analyzeAddress(address);
+    const stillAddressy = a2 || ADDRESS_STREET_RE.test(address) || ADDRESS_HOUSE_RE.test(address) || ADDRESS_POSTAL_RE.test(address);
+    if (!stillAddressy) return null;
+
+    return { text: address, score: a.score };
+  }
+
+  function collectAddresses() {
+    const results = [];
+    const seenElements = new Set();
+    const seenText = new Set();
+    const candidates = [];
+
+    try {
+      const sel = ADDRESS_SELECTORS.join(', ');
+      document.querySelectorAll(sel).forEach(el => {
+        try {
+          if (!isElementVisible(el)) return;
+          const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
+          if (t.length < 10 || t.length > 500) return;
+          const a = analyzeAddress(t);
+          if (!a) return;
+          if (seenElements.has(el)) return;
+          seenElements.add(el);
+          const extracted = extractAddress(t);
+          if (!extracted) return;
+          candidates.push({ element: el, text: extracted.text, score: extracted.score });
+        } catch { /* ignore */ }
+      });
+    } catch { /* ignore */ }
+
+    if (document.body) {
+      const walker = document.createTreeWalker(
+        document.body,
+        NodeFilter.SHOW_TEXT,
+        {
+          acceptNode(node) {
+            const parent = node.parentElement;
+            if (!parent) return NodeFilter.FILTER_REJECT;
+            const tag = parent.tagName;
+            if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT') return NodeFilter.FILTER_REJECT;
+            if (parent.getRootNode() !== document) return NodeFilter.FILTER_REJECT;
+            const v = node.nodeValue;
+            if (!v || v.length < 5 || v.length > 1000) return NodeFilter.FILTER_REJECT;
+            if (ADDRESS_LABEL_RE.test(v) ||
+                ADDRESS_POSTAL_RE.test(v) ||
+                ADDRESS_STREET_RE.test(v) ||
+                ADDRESS_REGION_RE.test(v) ||
+                ADDRESS_CITY_RE.test(v) ||
+                ADDRESS_SETTLEMENT_RE.test(v)) {
+              return NodeFilter.FILTER_ACCEPT;
+            }
+            return NodeFilter.FILTER_REJECT;
+          }
+        }
+      );
+
+      let node;
+      while ((node = walker.nextNode())) {
+        let block = node.parentElement;
+        let depth = 0;
+        let found = null;
+
+        while (block && depth < 8) {
+          const t = (block.textContent || '').replace(/\s+/g, ' ').trim();
+          if (t.length > 500) break;
+          if (t.length >= 10) {
+            const a = analyzeAddress(t);
+            if (a) { found = block; break; }
+          }
+          block = block.parentElement;
+          depth++;
+        }
+
+        if (!found) continue;
+        if (seenElements.has(found)) continue;
+        seenElements.add(found);
+
+        const t = (found.textContent || '').replace(/\s+/g, ' ').trim();
+        const extracted = extractAddress(t);
+        if (!extracted) continue;
+        candidates.push({ element: found, text: extracted.text, score: extracted.score });
+      }
+    }
+
+    const drop = new Set();
+    for (let i = 0; i < candidates.length; i++) {
+      for (let j = i + 1; j < candidates.length; j++) {
+        if (drop.has(i) || drop.has(j)) continue;
+        const ci = candidates[i], cj = candidates[j];
+        const a = ci.element, b = cj.element;
+        if (!a || !b || a === b) continue;
+        let ancIdx, descIdx, ancScore, descScore;
+        if (a.contains(b)) {
+          ancIdx = i; descIdx = j; ancScore = ci.score; descScore = cj.score;
+        } else if (b.contains(a)) {
+          ancIdx = j; descIdx = i; ancScore = cj.score; descScore = ci.score;
+        } else {
+          continue;
+        }
+        if (ancScore >= descScore) drop.add(descIdx);
+        else drop.add(ancIdx);
+      }
+    }
+    const deduped = candidates.filter((_, i) => !drop.has(i));
+
+    deduped.sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return a.text.length - b.text.length;
+    });
+
+    for (const c of deduped) {
+      const key = c.text.toLowerCase();
+      if (seenText.has(key)) continue;
+      seenText.add(key);
+      results.push({ element: c.element, text: c.text });
+      if (results.length >= 3) break;
+    }
+
+    return results;
+  }
+
+  function isYandexMapUrl(url) {
+    if (!url || typeof url !== 'string') return false;
+    try {
+      const u = new URL(url, window.location.href);
+      const host = u.hostname.replace(/^www\./, '').toLowerCase();
+      if (host === 'tech.yandex.ru' || host === 'tech.yandex.com') return false;
+      if (/^\/(?:legal|support|help|maps\/mapsapi)(?:\/|$)/i.test(u.pathname)) return false;
+      const isYandexHost = YANDEX_MAP_HOSTS.some(h => host === h || host.endsWith('.' + h));
+      if (!isYandexHost) return false;
+      return YANDEX_MAP_PATH_PATTERNS.some(p => p.test(u.pathname));
+    } catch { return false; }
+  }
+
+  function isJunkYandexMap(url) {
+    try {
+      const u = new URL(url);
+      const path = u.pathname.replace(/\/+$/, '');
+      const isRoot = /^\/(?:maps|map-widget)(?:\/v\d+)?$/.test(path) || path === '';
+      if (isRoot) {
+        const meaningful = ['um', 'oid', 'll', 'pt', 'text', 'what'];
+        return !meaningful.some(p => u.searchParams.has(p));
+      }
+      return false;
+    } catch { return true; }
+  }
+
+  function extractYandexMapAddress(url, el) {
+    try {
+      const u = new URL(url);
+      const textParam = u.searchParams.get('text') || u.searchParams.get('what');
+      if (textParam && textParam.length > 3 && textParam.length <= 300) {
+        return decodeURIComponent(textParam.replace(/\+/g, ' ')).trim();
+      }
+    } catch { /* ignore */ }
+
+    if (!el) return null;
+
+    try {
+      const title = (el.getAttribute('title') || '').trim();
+      if (title.length > 5 && title.length <= 300) return title;
+      const ariaLabel = (el.getAttribute('aria-label') || '').trim();
+      if (ariaLabel.length > 5 && ariaLabel.length <= 300) return ariaLabel;
+    } catch { /* ignore */ }
+
+    try {
+      let scope = el.parentElement;
+      let depth = 0;
+      while (scope && depth < 5) {
+        let sib = scope.previousElementSibling;
+        while (sib) {
+          const text = (sib.textContent || '').replace(/\s+/g, ' ').trim();
+          if (text.length >= 10 && text.length <= 500) {
+            const extracted = extractAddress(text);
+            if (extracted) return extracted.text;
+          }
+          sib = sib.previousElementSibling;
+        }
+        sib = scope.nextElementSibling;
+        while (sib) {
+          const text = (sib.textContent || '').replace(/\s+/g, ' ').trim();
+          if (text.length >= 10 && text.length <= 500) {
+            const extracted = extractAddress(text);
+            if (extracted) return extracted.text;
+          }
+          sib = sib.nextElementSibling;
+        }
+        scope = scope.parentElement;
+        depth++;
+      }
+    } catch { /* ignore */ }
+
+    return null;
+  }
+
+  function isYandexMapWatermark(el) {
+    if (!el) return false;
+    try {
+      const cls = typeof el.className === 'string' ? el.className : '';
+      if (/ymaps-[0-9-]+-gototech\b/.test(cls)) return true;
+      if (/ymaps-[0-9-]+-gototaxi\b/.test(cls)) return true;
+      if (/ymaps-[0-9-]+-gotoymaps\b/.test(cls)) return true;
+      if (/ymaps-[0-9-]+-copyright\b/.test(cls)) return true;
+    } catch { /* ignore */ }
+    return false;
+  }
+
+  function findYmapsContainer(el) {
+    if (!el) return null;
+    let node = el;
+    let depth = 0;
+    while (node && depth < 20) {
+      try {
+        const tag = (node.tagName || '').toLowerCase();
+        if (tag === 'ymaps') return node;
+        if (node.classList && node.classList.length > 0) {
+          const cls = typeof node.className === 'string' ? node.className : '';
+          if (cls.split(/\s+/).some(c => /^ymaps-[0-9-]+-map$/.test(c))) return node;
+        }
+      } catch { /* ignore */ }
+      node = node.parentElement;
+      depth++;
+    }
+    return null;
+  }
+
+  function collectYandexMaps() {
+    const results = [];
+    const seen = new Set();
+    const seenEls = new Set();
+
+    function tryAdd(rawUrl, sourceEl, forcedAddress) {
+      if (!rawUrl || typeof rawUrl !== 'string') return;
+      try {
+        const absolute = new URL(rawUrl, window.location.href).href;
+        if (!isYandexMapUrl(absolute)) return;
+        if (isJunkYandexMap(absolute)) return;
+        if (sourceEl && !isElementVisible(sourceEl)) return;
+
+        let targetEl = sourceEl;
+        if (sourceEl) {
+          if (isYandexMapWatermark(sourceEl)) {
+            targetEl = findYmapsContainer(sourceEl) || sourceEl;
+          } else {
+            const yc = findYmapsContainer(sourceEl);
+            if (yc && yc !== sourceEl) targetEl = yc;
+          }
+        }
+
+        if (targetEl && seenEls.has(targetEl)) return;
+        const normalized = normalizeUrl(absolute);
+        if (seen.has(normalized)) return;
+        seen.add(normalized);
+        if (targetEl) seenEls.add(targetEl);
+        const mapAddress = forcedAddress !== undefined
+          ? forcedAddress
+          : extractYandexMapAddress(absolute, targetEl);
+        results.push({ url: absolute, element: targetEl, mapAddress });
+      } catch { /* ignore */ }
+    }
+
+    try {
+      document.querySelectorAll('iframe[src]').forEach(iframe => {
+        const src = toUrlString(iframe.getAttribute('src')) || toUrlString(iframe.src);
+        if (!src) return;
+        tryAdd(src, iframe);
+      });
+    } catch { /* ignore */ }
+
+    try {
+      document.querySelectorAll('a[href]').forEach(a => {
+        const href = toUrlString(a.getAttribute('href')) || toUrlString(a.href);
+        if (!href) return;
+        tryAdd(href, a);
+      });
+    } catch { /* ignore */ }
+
+    try {
+      document.querySelectorAll('embed[src], object[data]').forEach(em => {
+        const src = toUrlString(em.getAttribute('src')) || toUrlString(em.getAttribute('data'));
+        if (!src) return;
+        tryAdd(src, em);
+      });
+    } catch { /* ignore */ }
+
+    try {
+      document.querySelectorAll('[data-init-params]').forEach(el => {
+        const params = el.getAttribute('data-init-params') || '';
+        if (!/"type"\s*:\s*"yandex"/i.test(params)) return;
+        if (!isElementVisible(el)) return;
+        if (seenEls.has(el)) return;
+
+        let data = null;
+        try { data = JSON.parse(params); } catch { return; }
+        if (!data) return;
+
+        let url = '';
+        if (data.center) {
+          const parts = String(data.center).split(',');
+          if (parts.length === 2) {
+            const lat = parts[0].trim();
+            const lon = parts[1].trim();
+            url = 'https://yandex.ru/maps/?ll=' + lon + ',' + lat + '&pt=' + lon + ',' + lat;
+            if (data.zoom) url += '&z=' + String(data.zoom);
+          }
+        }
+        if (!url) url = 'https://yandex.ru/maps/';
+
+        let mapAddress = null;
+        const points = Array.isArray(data.data) ? data.data : [];
+        if (points.length > 0 && points[0]) {
+          mapAddress = points[0].desc || points[0].name || null;
+        }
+
+        if (seen.has(url)) return;
+        seen.add(url);
+        seenEls.add(el);
+        results.push({ url, element: el, mapAddress });
+      });
+    } catch { /* ignore */ }
+
+    return results;
+  }
+
+  function findYandexMapElement(originalUrl) {
+    if (!originalUrl) return null;
+    let target = null;
+    try { target = new URL(originalUrl, window.location.href); } catch { return null; }
+    const targetOid = target.searchParams.get('oid');
+    const targetLl = target.searchParams.get('ll');
+    const targetPt = target.searchParams.get('pt');
+
+    let candidates;
+    try { candidates = document.querySelectorAll('iframe[src], embed[src], object[data]'); }
+    catch { return null; }
+
+    for (const el of candidates) {
+      const src = toUrlString(el.getAttribute('src')) ||
+                  toUrlString(el.getAttribute('data')) ||
+                  toUrlString(el.src) ||
+                  toUrlString(el.data);
+      if (!src) continue;
+      try {
+        const u = new URL(src, window.location.href);
+        if (u.href === target.href) return el;
+        if (targetOid && u.searchParams.get('oid') === targetOid) return el;
+        if (targetLl && targetPt &&
+            u.searchParams.get('ll') === targetLl &&
+            u.searchParams.get('pt') === targetPt) return el;
+      } catch { /* ignore */ }
+    }
+    return null;
+  }
+
+  function resolveYandexMapTarget(item) {
+    if (!item) return null;
+
+    const toContainer = (el) => {
+      if (!el) return null;
+      if (isYandexMapWatermark(el)) {
+        return findYmapsContainer(el) || el;
+      }
+      const yc = findYmapsContainer(el);
+      if (yc && yc !== el) return yc;
+      return el;
+    };
+
+    if (item.element && item.element.isConnected && isElementVisible(item.element)) {
+      return toContainer(item.element);
+    }
+
+    const found = findYandexMapElement(item.url);
+    if (found && isElementVisible(found)) return toContainer(found);
+
+    const hiddenSource = found || (item.element && item.element.isConnected ? item.element : null);
+    if (hiddenSource) {
+      const hidden = findTopmostHidden(hiddenSource);
+      if (hidden) {
+        const opener = findOpenerForPanel(hidden);
+        if (opener && isElementVisible(opener)) return opener;
+      }
+    }
+
+    if (item.element && item.element.isConnected) {
+      let node = item.element.parentElement;
+      while (node && node !== document.body) {
+        if (isElementVisible(node)) return node;
+        node = node.parentElement;
+      }
+    }
+
+    return null;
+  }
+
+  function extractOrganizationNames(text) {
+    if (!text || text.length < 5 || text.length > 3000) return [];
+    const matches = [];
+
+    for (const m of text.matchAll(ORG_ABBREV_RE)) {
+      matches.push({ idx: m.index, len: m[0].length });
+    }
+    for (const m of text.matchAll(ORG_FULL_RE)) {
+      matches.push({ idx: m.index, len: m[0].length });
+    }
+
+    matches.sort((a, b) => a.idx - b.idx);
+
+    const filtered = [];
+    let lastEnd = -1;
+    for (const m of matches) {
+      if (m.idx < lastEnd) continue;
+      filtered.push(m);
+      lastEnd = m.idx + m.len;
+    }
+
+    const results = [];
+    for (const m of filtered) {
+      const startIdx = m.idx;
+      const afterIdx = startIdx + m.len;
+      const after = text.slice(afterIdx, afterIdx + 15);
+
+      if (!/^[\s\-\u2010\u2011\u2012\u2013\u2014\u2212:.,]*[«"„"'А-ЯЁA-Zа-яё]/.test(after)) continue;
+      if (/^[\s\-\u2010\u2011\u2012\u2013\u2014\u2212:.,]*\d/.test(after)) continue;
+
+      const tail = text.slice(afterIdx, afterIdx + 200);
+      const stop = tail.match(ORG_STOP_RE);
+      const endIdx = stop ? afterIdx + stop.index : Math.min(afterIdx + 200, text.length);
+
+      let name = text.slice(startIdx, endIdx).replace(/\s+/g, ' ').trim();
+      name = name.replace(/[,;:.!?\-\u2010\u2011\u2012\u2013\u2014\u2212\s]+$/g, '').trim();
+
+      if (name.length <= m.len) continue;
+      if (name.length > 200) name = name.slice(0, 200).trim() + '…';
+      results.push(name);
+    }
+    return results;
+  }
+
+  function collectOrganizations() {
+    const results = [];
+    const seen = new Set();
+    const seenElements = new Set();
+
+    if (!document.body) return results;
+
+    const walker = document.createTreeWalker(
+      document.body,
+      NodeFilter.SHOW_TEXT,
+      {
+        acceptNode(node) {
+          const parent = node.parentElement;
+          if (!parent) return NodeFilter.FILTER_REJECT;
+          const tag = parent.tagName;
+          if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT') return NodeFilter.FILTER_REJECT;
+          if (parent.getRootNode() !== document) return NodeFilter.FILTER_REJECT;
+          const v = node.nodeValue || '';
+          if (v.length < 5 || v.length > 1000) return NodeFilter.FILTER_REJECT;
+          if (!v.match(ORG_ABBREV_RE) && !v.match(ORG_FULL_RE)) return NodeFilter.FILTER_REJECT;
+          return NodeFilter.FILTER_ACCEPT;
+        }
+      }
+    );
+
+    const BLOCK_TAGS = new Set([
+      'P', 'DIV', 'LI', 'TD', 'TR', 'TH', 'ARTICLE', 'SECTION', 'HEADER',
+      'FOOTER', 'MAIN', 'ASIDE', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
+      'ADDRESS', 'BLOCKQUOTE', 'TABLE', 'UL', 'OL', 'DL', 'FIGURE'
+    ]);
+
+    let node;
+    while ((node = walker.nextNode())) {
+      const parent = node.parentElement;
+      if (!parent) continue;
+      if (seenElements.has(parent)) continue;
+      seenElements.add(parent);
+
+      let container = parent;
+      let cur = parent;
+      let depth = 0;
+      while (cur && depth < 6) {
+        if (BLOCK_TAGS.has(cur.tagName)) { container = cur; break; }
+        cur = cur.parentElement;
+        depth++;
+      }
+      if (!container) container = parent;
+      if (!isElementVisible(container)) {
+        if (!isElementVisible(parent)) continue;
+        container = parent;
+      }
+
+      let text = parent.textContent || '';
+      let up = parent.parentElement;
+      let upDepth = 0;
+      while (up && upDepth < 2 && text.length < 300) {
+        const upText = up.textContent || '';
+        if (upText.length > 2000) break;
+        text = upText;
+        up = up.parentElement;
+        upDepth++;
+      }
+      if (!text) continue;
+
+      const orgs = extractOrganizationNames(text);
+      for (const orgName of orgs) {
+        const key = orgName.toLowerCase().replace(/\s+/g, ' ');
+        if (seen.has(key)) continue;
+        seen.add(key);
+        results.push({ element: container, text: orgName });
+        if (results.length >= 3) return results;
+      }
+    }
+
+    return results;
+  }
+
+  function collectSchedule() {
+    const results = [];
+    const seenElements = new Set();
+    const seenText = new Set();
+    const candidates = [];
+
+    function cleanText(t) {
+      return (t || '').replace(/\s+/g, ' ').trim();
+    }
+
+    function countMatches(text, reG) {
+      const m = text.match(reG);
+      return m ? m.length : 0;
+    }
+
+    function analyze(text) {
+      if (!text || text.length < 3 || text.length > 500) return null;
+      const rangeCount =
+        countMatches(text, SCHEDULE_TIME_RANGE_RE_G) +
+        countMatches(text, SCHEDULE_FROM_TO_RE_G);
+      const hasStrong = SCHEDULE_STRONG_LABEL_RE.test(text);
+      const hasSemantic = SCHEDULE_SEMANTIC_LABEL_RE.test(text);
+      const hasDays = SCHEDULE_DAYS_RE.test(text);
+      const hasRoundClock = SCHEDULE_ROUND_CLOCK_RE.test(text);
+
+      const accepted =
+        hasStrong ||
+        rangeCount >= 2 ||
+        (rangeCount >= 1 && (hasDays || hasSemantic)) ||
+        hasRoundClock;
+
+      if (!accepted) return null;
+
+      let score = 0;
+      if (hasStrong) score += 5;
+      if (hasRoundClock) score += 3;
+      score += Math.min(rangeCount, 3) * 2;
+      if (hasDays) score += 1;
+      if (hasSemantic) score += 1;
+
+      return { score, hasTime: rangeCount > 0, hasRoundClock };
+    }
+
+    try {
+      const sel = SCHEDULE_SELECTORS.join(', ');
+      document.querySelectorAll(sel).forEach(el => {
+        try {
+          if (!isElementVisible(el)) return;
+          const t = cleanText(el.textContent);
+          const a = analyze(t);
+          if (!a) return;
+          if (!a.hasTime && !a.hasRoundClock) return;
+          if (seenElements.has(el)) return;
+          seenElements.add(el);
+          candidates.push({ element: el, text: t, score: a.score });
+        } catch { /* ignore */ }
+      });
+    } catch { /* ignore */ }
+
+    if (document.body) {
+      const walker = document.createTreeWalker(
+        document.body,
+        NodeFilter.SHOW_TEXT,
+        {
+          acceptNode(node) {
+            const parent = node.parentElement;
+            if (!parent) return NodeFilter.FILTER_REJECT;
+            const tag = parent.tagName;
+            if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT') return NodeFilter.FILTER_REJECT;
+            if (parent.getRootNode() !== document) return NodeFilter.FILTER_REJECT;
+            const v = node.nodeValue;
+            if (!v || v.length > 2000) return NodeFilter.FILTER_REJECT;
+            if (SCHEDULE_TIME_RANGE_RE.test(v) ||
+                SCHEDULE_FROM_TO_RE.test(v) ||
+                SCHEDULE_ROUND_CLOCK_RE.test(v) ||
+                SCHEDULE_STRONG_LABEL_RE.test(v)) {
+              return NodeFilter.FILTER_ACCEPT;
+            }
+            return NodeFilter.FILTER_REJECT;
+          }
+        }
+      );
+
+      let node;
+      while ((node = walker.nextNode())) {
+        let block = node.parentElement;
+        let depth = 0;
+        let found = null;
+        let fallback = null;
+
+        while (block && depth < 8) {
+          const t = cleanText(block.textContent);
+          if (t.length > 2000) break;
+          if (t.length > 0 && t.length <= 500) {
+            const a = analyze(t);
+            if (a && (a.hasTime || a.hasRoundClock)) {
+              found = block;
+              break;
+            }
+            if (a && a.hasStrong && !fallback) fallback = block;
+          }
+          block = block.parentElement;
+          depth++;
+        }
+
+        if (!found && fallback) found = fallback;
+        if (!found) continue;
+        if (seenElements.has(found)) continue;
+        seenElements.add(found);
+
+        const t = cleanText(found.textContent);
+        const a = analyze(t);
+        if (!a) continue;
+        candidates.push({ element: found, text: t, score: a.score });
+      }
+    }
+
+    const drop = new Set();
+    for (let i = 0; i < candidates.length; i++) {
+      for (let j = i + 1; j < candidates.length; j++) {
+        if (drop.has(i) || drop.has(j)) continue;
+        const ci = candidates[i], cj = candidates[j];
+        const a = ci.element, b = cj.element;
+        if (!a || !b || a === b) continue;
+        let ancIdx, descIdx, ancScore, descScore;
+        if (a.contains(b)) {
+          ancIdx = i; descIdx = j; ancScore = ci.score; descScore = cj.score;
+        } else if (b.contains(a)) {
+          ancIdx = j; descIdx = i; ancScore = cj.score; descScore = ci.score;
+        } else {
+          continue;
+        }
+        if (ancScore >= descScore) drop.add(descIdx);
+        else drop.add(ancIdx);
+      }
+    }
+    const deduped = candidates.filter((_, i) => !drop.has(i));
+
+    deduped.sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return a.text.length - b.text.length;
+    });
+
+    for (const c of deduped) {
+      const key = c.text.toLowerCase();
+      if (seenText.has(key)) continue;
+      seenText.add(key);
+      results.push({ element: c.element, text: c.text });
+      if (results.length >= 3) break;
+    }
+
+    return results;
   }
 
   function isElementVisible(el) {
@@ -1528,6 +2547,43 @@
         });
       } catch { /* ignore */ }
     });
+
+    // NEW: голые URL в тексте (не внутри <a>) — например, https://vk.com/... в <p>
+    try {
+      if (document.body) {
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+          acceptNode(node) {
+            const p = node.parentElement;
+            if (!p) return NodeFilter.FILTER_REJECT;
+            const tag = p.tagName;
+            if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT' || tag === 'A') return NodeFilter.FILTER_REJECT;
+            if (p.getRootNode() !== document) return NodeFilter.FILTER_REJECT;
+            const v = node.nodeValue;
+            if (!v || v.length < 8 || v.length > 500) return NodeFilter.FILTER_REJECT;
+            if (!/https?:\/\/|(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}/.test(v)) return NodeFilter.FILTER_REJECT;
+            return NodeFilter.FILTER_ACCEPT;
+          }
+        });
+        let tn;
+        while ((tn = walker.nextNode())) {
+          const text = tn.nodeValue || '';
+          const matches = text.match(TEXT_URL_REGEX);
+          if (!matches) continue;
+          for (const m of matches) {
+            let raw = m;
+            if (!/^https?:\/\//i.test(raw)) raw = 'https://' + raw;
+            try {
+              const decoded = decodeRedirect(raw);
+              const absolute = new URL(decoded, window.location.href).href;
+              const u = new URL(absolute);
+              if (u.protocol !== 'http:' && u.protocol !== 'https:') continue;
+              links.add(absolute);
+            } catch { /* skip */ }
+          }
+        }
+      }
+    } catch { /* ignore */ }
+
     return Array.from(links);
   }
 
@@ -1549,7 +2605,6 @@
       if (network === 'ok' && OK_OBJECT_PATH_REGEX.test(u.pathname)) return true;
       let sp = u.searchParams;
       if (sp.has('redirect_uri') || sp.has('response_type')) return true;
-      // FIX: WhatsApp-ссылки с phone — контактные, не шаринг.
       if (network === 'vk' || network === 'ok') {
         if (sp.has('text') || sp.has('url') || sp.has('share') || sp.has('st.cmd') || sp.has('st.shareUrl')) return true;
       } else if (network === 'whatsapp') {
@@ -1620,6 +2675,7 @@
         if (getBookingServiceByDomain(domain)) return;
         if (domain === currentHost) return;
         if (SERVICE_DOMAINS.has(domain)) return;
+        if (isYandexMapUrl(absolute)) return;
         if (sourceEl && !isElementVisible(sourceEl)) return;
         const normalized = normalizeUrl(absolute);
         if (seen.has(normalized)) return;
@@ -1688,6 +2744,9 @@
       else if (item.email) key += item.email.email;
       else if (item.inn) key += item.inn.value;
       else if (item.ogrn) key += item.ogrn.value;
+      else if (item.schedule) key += item.schedule.text;
+      else if (item.org) key += item.org.text;
+      else if (item.address) key += item.address.text;
       for (let j = 0; j < key.length; j++) hash = ((hash << 5) - hash + key.charCodeAt(j)) | 0;
     }
     return hash;
@@ -1751,6 +2810,40 @@
         }
       } catch { /* ignore */ }
 
+      try {
+        const orgs = collectOrganizations();
+        for (const o of orgs) {
+          results.push({ url: null, org: o, network: 'org', isDirect: false });
+        }
+      } catch { /* ignore */ }
+
+      try {
+        const addresses = collectAddresses();
+        for (const a of addresses) {
+          results.push({ url: null, address: a, network: 'address', isDirect: false });
+        }
+      } catch { /* ignore */ }
+
+      try {
+        const maps = collectYandexMaps();
+        for (const m of maps) {
+          results.push({
+            url: m.url,
+            mapAddress: m.mapAddress,
+            element: m.element,
+            network: 'yandexmap',
+            isDirect: false
+          });
+        }
+      } catch { /* ignore */ }
+
+      try {
+        const schedules = collectSchedule();
+        for (const s of schedules) {
+          results.push({ url: null, schedule: s, network: 'schedule', isDirect: false });
+        }
+      } catch { /* ignore */ }
+
       let collected = { phones: [], emails: [], inns: [], ogrns: [] };
       try { collected = collectAllData(); } catch { /* ignore */ }
 
@@ -1801,7 +2894,15 @@
     .lr-title { font-size: 14px; color: #00a550; font-weight: 700; }
     .lr-feedback { font-size: 11px; color: #6b7280; text-decoration: none; transition: color 0.2s; cursor: pointer; }
     .lr-feedback:hover { color: #00a550; }
-    .lr-links { overflow-y: auto; max-height: 400px; padding: 12px; background: #fff; }
+    .lr-tabs { display: flex; gap: 4px; padding: 8px 12px; background: #f9fafb; border-bottom: 1px solid #e5e7eb; }
+    .lr-tab { flex: 1; padding: 6px 4px; border-radius: 8px; font-size: 10px; font-weight: 600; color: #6b7280; cursor: pointer; text-align: center; border: 1px solid transparent; transition: all 0.15s; user-select: none; display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 0; }
+    .lr-tab.hidden { display: none; }
+    .lr-tab:hover { background: #f3f4f6; color: #374151; }
+    .lr-tab.active { background: #fff; color: #00a550; border-color: #00a550; box-shadow: 0 1px 3px rgba(0, 165, 80, 0.15); }
+    .lr-tab-label { font-size: 10px; line-height: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+    .lr-tab-count { font-size: 9px; font-weight: 700; background: #e5e7eb; color: #6b7280; padding: 1px 5px; border-radius: 6px; min-width: 16px; display: inline-block; line-height: 1.1; }
+    .lr-tab.active .lr-tab-count { background: #00a550; color: #fff; }
+    .lr-links { overflow-y: auto; max-height: 360px; padding: 12px; background: #fff; }
     .lr-empty { text-align: center; padding: 40px 20px; color: #9ca3af; font-size: 13px; }
     .lr-more { text-align: center; padding: 12px; margin-top: 4px; background: #f3f4f6; border-radius: 12px; cursor: pointer; font-size: 13px; color: #3b82f6; font-weight: 500; transition: 0.15s; border: 1px solid #e5e7eb; }
     .lr-more:hover { background: #e5e7eb; }
@@ -1812,6 +2913,10 @@
     .lr-card-text { overflow: hidden; flex: 1; }
     .lr-card-title { font-size: 12px; font-weight: 600; color: #1f2937; }
     .lr-card-sub { font-size: 9px; color: #6b7280; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .lr-card-schedule { font-size: 10px; color: #475569; line-height: 1.4; word-break: break-word; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; margin-top: 2px; }
+    .lr-card-org { font-size: 10px; color: #4338ca; line-height: 1.4; word-break: break-word; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; margin-top: 2px; }
+    .lr-card-address { font-size: 10px; color: #065f46; line-height: 1.4; word-break: break-word; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; margin-top: 2px; }
+    .lr-card-map-address { font-size: 10px; color: #7c2d12; line-height: 1.4; word-break: break-word; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; margin-top: 2px; }
     .lr-copy { display: inline-block; background: #00a550; border: none; padding: 6px 14px; border-radius: 20px; color: #fff; font-size: 10px; font-family: inherit; font-weight: 600; cursor: pointer; white-space: nowrap; min-height: 28px; user-select: none; transition: background 0.15s, transform 0.08s; }
     .lr-copy:active { transform: scale(0.95); }
     ::-webkit-scrollbar { width: 6px; height: 6px; }
@@ -1935,7 +3040,11 @@
     left.appendChild(iconBox); left.appendChild(textBox);
     const right = el('div', '');
     right.className = 'lr-card-right';
-    right.appendChild(makeCopyButton(getCopyPath(item.url)));
+    // NEW: для Дзена и Рутуба — полная ссылка, иначе путь
+    const copyValue = (item.network === 'dzen' || item.network === 'rutube')
+      ? item.url
+      : getCopyPath(item.url);
+    right.appendChild(makeCopyButton(copyValue));
     card.appendChild(left); card.appendChild(right);
     return card;
   }
@@ -1997,8 +3106,180 @@
     return card;
   }
 
+  function createScheduleCard(item) {
+    const s = item.schedule;
+    const card = el('div', 'background:#f0f9ff;border-color:#0ea5e9;');
+    card.className = 'lr-card';
+
+    const left = el('div', '');
+    left.className = 'lr-card-left';
+    left.addEventListener('click', () => {
+      clearHighlights('linkradar-schedule-highlight');
+      if (s.element && s.element.isConnected && isElementVisible(s.element)) {
+        applyHighlight(s.element, '#0ea5e9', 'linkradar-schedule-highlight', null);
+      } else if (s.text) {
+        const found = findElementByTextInDOM(s.text);
+        if (found) applyHighlight(found, '#0ea5e9', 'linkradar-schedule-highlight', null);
+      }
+    });
+    left.addEventListener('mouseenter', () => { card.style.borderColor = '#0284c7'; card.style.background = '#e0f2fe'; });
+    left.addEventListener('mouseleave', () => { card.style.borderColor = '#0ea5e9'; card.style.background = '#f0f9ff'; });
+
+    const iconBox = el('div', 'background:#0ea5e9;', '🕒');
+    iconBox.className = 'lr-icon';
+
+    const textBox = el('div', '');
+    textBox.className = 'lr-card-text';
+
+    const title = el('div', '', 'График работы');
+    title.className = 'lr-card-title';
+
+    const sub = el('div', '', s.text);
+    sub.className = 'lr-card-schedule';
+    sub.title = s.text;
+
+    textBox.appendChild(title);
+    textBox.appendChild(sub);
+    left.appendChild(iconBox);
+    left.appendChild(textBox);
+
+    card.appendChild(left);
+    return card;
+  }
+
+  function createOrgCard(item) {
+    const o = item.org;
+    const card = el('div', 'background:#eef2ff;border-color:#6366f1;');
+    card.className = 'lr-card';
+
+    const left = el('div', '');
+    left.className = 'lr-card-left';
+    left.addEventListener('click', () => {
+      clearHighlights('linkradar-org-highlight');
+      if (o.element && o.element.isConnected && isElementVisible(o.element)) {
+        applyHighlight(o.element, '#6366f1', 'linkradar-org-highlight', null);
+      } else if (o.text) {
+        const found = findElementByTextInDOM(o.text);
+        if (found) applyHighlight(found, '#6366f1', 'linkradar-org-highlight', null);
+      }
+    });
+    left.addEventListener('mouseenter', () => { card.style.borderColor = '#4f46e5'; card.style.background = '#e0e7ff'; });
+    left.addEventListener('mouseleave', () => { card.style.borderColor = '#6366f1'; card.style.background = '#eef2ff'; });
+
+    const iconBox = el('div', 'background:#6366f1;', '🏢');
+    iconBox.className = 'lr-icon';
+
+    const textBox = el('div', '');
+    textBox.className = 'lr-card-text';
+
+    const title = el('div', '', 'Организация');
+    title.className = 'lr-card-title';
+
+    const sub = el('div', '', o.text);
+    sub.className = 'lr-card-org';
+    sub.title = o.text;
+
+    textBox.appendChild(title);
+    textBox.appendChild(sub);
+    left.appendChild(iconBox);
+    left.appendChild(textBox);
+
+    const right = el('div', '');
+    right.className = 'lr-card-right';
+    right.appendChild(makeCopyButton(o.text));
+
+    card.appendChild(left);
+    card.appendChild(right);
+    return card;
+  }
+
+  function createAddressCard(item) {
+    const a = item.address;
+    const card = el('div', 'background:#ecfdf5;border-color:#10b981;');
+    card.className = 'lr-card';
+
+    const left = el('div', '');
+    left.className = 'lr-card-left';
+    left.addEventListener('click', () => {
+      clearHighlights('linkradar-address-highlight');
+      if (a.element && a.element.isConnected && isElementVisible(a.element)) {
+        applyHighlight(a.element, '#10b981', 'linkradar-address-highlight', null);
+      } else if (a.text) {
+        const found = findElementByTextInDOM(a.text);
+        if (found) applyHighlight(found, '#10b981', 'linkradar-address-highlight', null);
+      }
+    });
+    left.addEventListener('mouseenter', () => { card.style.borderColor = '#059669'; card.style.background = '#d1fae5'; });
+    left.addEventListener('mouseleave', () => { card.style.borderColor = '#10b981'; card.style.background = '#ecfdf5'; });
+
+    const iconBox = el('div', 'background:#10b981;', '📍');
+    iconBox.className = 'lr-icon';
+
+    const textBox = el('div', '');
+    textBox.className = 'lr-card-text';
+
+    const title = el('div', '', 'Адрес');
+    title.className = 'lr-card-title';
+
+    const sub = el('div', '', a.text);
+    sub.className = 'lr-card-address';
+    sub.title = a.text;
+
+    textBox.appendChild(title);
+    textBox.appendChild(sub);
+    left.appendChild(iconBox);
+    left.appendChild(textBox);
+
+    card.appendChild(left);
+    return card;
+  }
+
+  function createYandexMapCard(item) {
+    const card = el('div', 'background:#fff4ee;border-color:#fc3f1d;');
+    card.className = 'lr-card';
+
+    const left = el('div', '');
+    left.className = 'lr-card-left';
+    left.addEventListener('click', () => {
+      clearHighlights('linkradar-yandexmap-highlight');
+      const target = resolveYandexMapTarget(item);
+      if (target) {
+        applyHighlight(target, '#fc3f1d', 'linkradar-yandexmap-highlight', null);
+      }
+    });
+    left.addEventListener('mouseenter', () => { card.style.borderColor = '#e0350f'; card.style.background = '#ffe8dd'; });
+    left.addEventListener('mouseleave', () => { card.style.borderColor = '#fc3f1d'; card.style.background = '#fff4ee'; });
+
+    const iconBox = el('div', 'background:#fc3f1d;', '🗺️');
+    iconBox.className = 'lr-icon';
+
+    const textBox = el('div', '');
+    textBox.className = 'lr-card-text';
+
+    const title = el('div', '', 'Яндекс.Карта');
+    title.className = 'lr-card-title';
+
+    let subText = item.mapAddress || 'Показать на странице';
+    if (subText.length > 80) subText = subText.slice(0, 80) + '…';
+    const sub = el('div', '', subText);
+    sub.className = 'lr-card-map-address';
+    sub.title = item.mapAddress || item.url;
+
+    textBox.appendChild(title);
+    textBox.appendChild(sub);
+    left.appendChild(iconBox);
+    left.appendChild(textBox);
+
+    card.appendChild(left);
+    return card;
+  }
+
   function createCard(item) {
     if (CARD_META[item.network]) return createDataCard(item);
+    if (item.network === 'schedule') return createScheduleCard(item);
+    if (item.network === 'org') return createOrgCard(item);
+    if (item.network === 'address') return createAddressCard(item);
+    if (item.network === 'yandexmap') return createYandexMapCard(item);
     if (item.network === 'website') return createWebsiteCard(item);
     if (item.isBooking) return createBookingCard(item);
     return createSocialCard(item);
@@ -2013,6 +3294,9 @@
   function createPanel() {
     removeOrphanPanel();
     if (panel) return;
+
+    activeTabId = 'org';
+    currentItems = null;
 
     panel = document.createElement('div');
     panel.id = 'linkRadarPanel';
@@ -2118,11 +3402,30 @@
     headerLeft.appendChild(feedbackLinkEl);
     header.appendChild(headerLeft);
 
+    tabsEl = document.createElement('div');
+    tabsEl.className = 'lr-tabs';
+    TAB_CONFIG.forEach(tab => {
+      const tabBtn = document.createElement('div');
+      tabBtn.className = 'lr-tab hidden';
+      tabBtn.dataset.tabId = tab.id;
+      const labelEl = document.createElement('div');
+      labelEl.className = 'lr-tab-label';
+      labelEl.textContent = tab.label;
+      const countEl = document.createElement('div');
+      countEl.className = 'lr-tab-count';
+      countEl.textContent = '0';
+      tabBtn.appendChild(labelEl);
+      tabBtn.appendChild(countEl);
+      tabBtn.addEventListener('click', () => switchTab(tab.id));
+      tabsEl.appendChild(tabBtn);
+    });
+
     linksContainerEl = document.createElement('div');
     linksContainerEl.className = 'lr-links';
     linksContainerEl.style.borderRadius = `0 0 ${PANEL_CONFIG.borderRadius} ${PANEL_CONFIG.borderRadius}`;
 
     windowEl.appendChild(header);
+    windowEl.appendChild(tabsEl);
     windowEl.appendChild(linksContainerEl);
     root.appendChild(windowEl);
     document.body.appendChild(panel);
@@ -2191,16 +3494,42 @@
     if (!linksContainerEl) return;
     if (!items) items = [];
 
+    currentItems = items;
+
+    updateTabs(items);
+
+    const counts = countByTab(items);
+    if ((counts[activeTabId] || 0) === 0) {
+      let picked = null;
+      for (const tab of TAB_CONFIG) {
+        if (counts[tab.id] > 0) { picked = tab.id; break; }
+      }
+      if (picked) {
+        activeTabId = picked;
+        updateTabsActive();
+      }
+    }
+
+    const totalCount = counts.org + counts.address + counts.contacts + counts.schedule;
+    const filtered = totalCount === 0 ? [] : filterByTab(items, activeTabId);
+
     linksContainerEl.textContent = '';
 
-    if (items.length === 0) {
+    if (totalCount === 0) {
       const empty = el('div', '', '🔍 Ничего не найдено');
       empty.className = 'lr-empty';
       linksContainerEl.appendChild(empty);
       return;
     }
 
-    const totalItems = items.length;
+    if (filtered.length === 0) {
+      const empty = el('div', '', getEmptyMessage(activeTabId));
+      empty.className = 'lr-empty';
+      linksContainerEl.appendChild(empty);
+      return;
+    }
+
+    const totalItems = filtered.length;
     const showItems = Math.min(totalItems, CACHE_CONFIG.maxItems);
     const hasMore = totalItems > CACHE_CONFIG.maxItems;
 
@@ -2214,7 +3543,7 @@
 
       const end = Math.min(currentIndex + CACHE_CONFIG.chunkSize, showItems);
       for (let i = currentIndex; i < end; i++) {
-        const card = createCard(items[i]);
+        const card = createCard(filtered[i]);
         if (card) fragment.appendChild(card);
       }
       currentIndex = end;
@@ -2247,7 +3576,7 @@
 
                 const end = Math.min(idx + CACHE_CONFIG.chunkSize, totalItems);
                 for (let i = idx; i < end; i++) {
-                  const card = createCard(items[i]);
+                  const card = createCard(filtered[i]);
                   if (card) allFragment.appendChild(card);
                 }
                 idx = end;
@@ -2286,9 +3615,6 @@
     return false;
   }
 
-  // FIX: добавлены селекторы соцсетевых ссылок — на SPA (Vue/React) кнопки
-  // WhatsApp/Telegram/VK дорисовываются после открытия панели, и раньше
-  // observer не понимал, что появились новые данные.
   function mutationsCouldAddData(mutations) {
     for (let i = 0; i < mutations.length; i++) {
       const m = mutations[i];
@@ -2299,6 +3625,7 @@
         if (node.nodeType !== 1) continue;
         try {
           if (node.matches && node.matches(
+            'iframe[src*="yandex"][src*="map"], a[href*="yandex"][href*="/maps"], a[href*="yandex"][href*="map-widget"], [data-init-params], ' +
             'a[href^="tel:"], a[href^="mailto:"], ' +
             'a[href*="wa.me"], a[href*="api.whatsapp.com"], a[href*="whatsapp.com"], ' +
             'a[href*="t.me"], a[href*="telegram.me"], a[href*="telegram.org"], ' +
@@ -2312,10 +3639,12 @@
             '[data-phone], [data-tel], [data-number], [data-contact], ' +
             '[data-email], [data-mail], [data-contact-email], ' +
             '[data-inn], [data-innfl], [data-innul], ' +
-            '[data-ogrn], [data-ogrnip], [data-ogrnul], [data-list]'
+            '[data-ogrn], [data-ogrnip], [data-ogrnul], [data-list], ' +
+            '[itemprop="address"], [data-address], [data-addr], address'
           )) return true;
 
           if (node.querySelector && node.querySelector(
+            'iframe[src*="yandex"][src*="map"], a[href*="yandex"][href*="/maps"], a[href*="yandex"][href*="map-widget"], [data-init-params], ' +
             'a[href^="tel:"], a[href^="mailto:"], ' +
             'a[href*="wa.me"], a[href*="api.whatsapp.com"], a[href*="whatsapp.com"], ' +
             'a[href*="t.me"], a[href*="telegram.me"], ' +
@@ -2323,7 +3652,8 @@
             'a[href*="youtube.com"], a[href*="youtu.be"], ' +
             'a[href*="instagram.com"], a[href*="tiktok.com"], ' +
             'a[href*="dzen.ru"], a[href*="zen.yandex"], ' +
-            '[data-phone], [data-email], [data-inn], [data-ogrn], [data-list]'
+            '[data-phone], [data-email], [data-inn], [data-ogrn], [data-list], ' +
+            '[itemprop="address"], [data-address], [data-addr], address'
           )) return true;
 
           const siteSel = SITE_BLOCK_SELECTORS.join(', ');
@@ -2368,7 +3698,36 @@
             }
             if (digits >= 7) return true;
 
+            {
+              const tl = t.toLowerCase();
+              if (/https?:\/\/|(?:[a-z0-9-]+\.)+[a-z]{2,}/.test(tl)) {
+                for (const net in SOCIAL_DOMAINS) {
+                  const doms = SOCIAL_DOMAINS[net];
+                  for (let d = 0; d < doms.length; d++) {
+                    if (tl.indexOf(doms[d]) !== -1) return true;
+                  }
+                }
+                for (const svc in BOOKING_DOMAINS) {
+                  const doms = BOOKING_DOMAINS[svc];
+                  for (let d = 0; d < doms.length; d++) {
+                    if (tl.indexOf(doms[d]) !== -1) return true;
+                  }
+                }
+              }
+            }
+
+            if (/yandex\.[a-z.]+\/(?:maps|map-widget)/i.test(t)) return true;
+
             if (t.length < 3000 && LOCAL_PHONE_LABEL_REGEX.test(t)) return true;
+
+            if (SCHEDULE_STRONG_LABEL_RE.test(t) || SCHEDULE_ROUND_CLOCK_RE.test(t)) return true;
+
+            if (t.match(ORG_ABBREV_RE)) return true;
+            if (t.match(ORG_FULL_RE)) return true;
+
+            if (t.length < 3000 && ADDRESS_LABEL_RE.test(t)) return true;
+            if (t.length < 1000 && ADDRESS_POSTAL_RE.test(t) && ADDRESS_STREET_RE.test(t)) return true;
+            if (t.length < 1000 && ADDRESS_STREET_RE.test(t) && ADDRESS_HOUSE_RE.test(t)) return true;
 
             try {
               if (node.classList && node.classList.length > 0) {
@@ -2448,14 +3807,21 @@
     panelShadowRoot = null;
     badgeEl = null;
     windowEl = null;
+    tabsEl = null;
     linksContainerEl = null;
     panelTitleEl = null;
     feedbackLinkEl = null;
     isPanelOpen = false;
 
+    currentItems = null;
+
     clearHighlights('linkradar-phone-highlight');
     clearHighlights('linkradar-email-highlight');
     clearHighlights('linkradar-verification-highlight');
+    clearHighlights('linkradar-schedule-highlight');
+    clearHighlights('linkradar-org-highlight');
+    clearHighlights('linkradar-address-highlight');
+    clearHighlights('linkradar-yandexmap-highlight');
   }
 
   function setupCleanup() {
