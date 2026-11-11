@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "LinkRadar",
-  "version": "0.2.1",
-  "version_name": "beta 0.2.1",
+  "version": "0.3.1",
+  "version_name": "beta 0.3.1",
   "minimum_chrome_version": "102",
   "description": "Находит ссылки на соцсети, телефоны, email, ИНН и ОГРН по клику пользователя",
   "permissions": ["activeTab", "scripting", "notifications"],
@@ -15,7 +15,7 @@
     "128": "icons/icon128.png"
   },
   "action": {
-    "default_title": "Запустить LinkRadar (beta 0.2.1)",
+    "default_title": "Запустить LinkRadar (beta 0.3.1)",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png",
